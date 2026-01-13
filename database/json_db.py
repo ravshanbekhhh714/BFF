@@ -1,557 +1,445 @@
 """
-JSON fayllar bilan ishlash moduli - To'liq versiya
-Barcha CRUD operatsiyalari bilan
+Database bilan ishlash moduli - PostgreSQL versiya
+(Tashqi ko'rinishi eski JSONDatabase bilan bir xil)
 """
 
-import json
 import os
+import logging
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from datetime import datetime
 from typing import List, Optional, Dict, Any
-import config
 import random
-import logging
+
+# Config faylingizdan kerakli o'zgaruvchilarni import qiling
+# Agar configda DATABASE_URL bo'lmasa, uni os.getenv dan olamiz
+import config 
 
 logger = logging.getLogger(__name__)
 
-
 class JSONDatabase:
     """
-    JSON fayllar bilan ishlash klassi
-    Bu klass barcha ma'lumotlar bazasi operatsiyalarini amalga oshiradi
+    Eski JSONDatabase klassining PostgreSQL adaptatsiyasi.
+    Barcha metodlar va nomlar saqlab qolingan.
     """
 
     def __init__(self):
         """
-        Initsializatsiya - data papkasini va fayllarni yaratish
+        Initsializatsiya - Bazaga ulanish va jadvallarni yaratish
         """
-        # Data papkasini yaratish
-        if not os.path.exists(config.DATA_DIR):
-            os.makedirs(config.DATA_DIR)
-            logger.info(f"✅ Data papka yaratildi: {config.DATA_DIR}")
+        # Railwayda DATABASE_URL environment variable ichida bo'ladi
+        self.db_url = os.getenv("DATABASE_URL")
+        
+        if not self.db_url:
+            logger.error("❌ DATABASE_URL topilmadi! Railway Variables ni tekshiring.")
+            return
 
-        # Fayllarni initsializatsiya qilish
-        self._init_file(config.PRODUCTS_FILE, [])
-        self._init_file(config.ORDERS_FILE, [])
-        self._init_file(config.USERS_FILE, [])
-        self._init_file(config.CATEGORIES_FILE, [
-            "👕 Kiyimlar",
-            "👟 Poyabzal",
-            "🎒 Sumkalar",
-            "⌚ Aksessuarlar",
-            "📱 Elektronika",
-            "🏠 Uy-ro'zg'or"
-        ])
+        self._create_tables()
+        logger.info("✅ PostgreSQL Database initsializatsiya qilindi")
 
-        logger.info("✅ JSON Database initsializatsiya qilindi")
+    def _get_connection(self):
+        """Bazaga ulanish ob'ektini qaytaradi"""
+        conn = psycopg2.connect(self.db_url, cursor_factory=RealDictCursor)
+        conn.autocommit = True
+        return conn
 
-    def _init_file(self, filepath: str, default_data: Any):
-        """
-        Agar fayl bo'lmasa, default ma'lumotlar bilan yaratish
-
-        Args:
-            filepath: Fayl yo'li
-            default_data: Default ma'lumotlar
-        """
-        if not os.path.exists(filepath):
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(default_data, f, ensure_ascii=False, indent=2)
-            logger.info(f"✅ Fayl yaratildi: {filepath}")
-
-    def _read_json(self, filepath: str) -> Any:
-        """
-        JSON fayldan o'qish
-
-        Args:
-            filepath: Fayl yo'li
-
-        Returns:
-            Any: O'qilgan ma'lumotlar
-        """
+    def _create_tables(self):
+        """Jadvallarni yaratish (agar yo'q bo'lsa)"""
         try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            logger.error(f"❌ Faylni o'qishda xatolik ({filepath}): {e}")
-            # Default qiymat qaytarish
-            if filepath == config.CATEGORIES_FILE:
-                return []
-            return []
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    # Categories jadvali
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS categories (
+                            name TEXT PRIMARY KEY
+                        );
+                    """)
+                    
+                    # Products jadvali
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS products (
+                            id SERIAL PRIMARY KEY,
+                            category TEXT REFERENCES categories(name) ON DELETE CASCADE,
+                            name TEXT NOT NULL,
+                            description TEXT,
+                            price DECIMAL(15, 2),
+                            size TEXT,
+                            photo_id TEXT,
+                            is_available BOOLEAN DEFAULT TRUE,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        );
+                    """)
 
-    def _write_json(self, filepath: str, data: Any):
-        """
-        JSON faylga yozish
+                    # Users jadvali
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS users (
+                            user_id BIGINT PRIMARY KEY,
+                            username TEXT,
+                            first_name TEXT,
+                            last_name TEXT,
+                            is_blocked BOOLEAN DEFAULT FALSE,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        );
+                    """)
 
-        Args:
-            filepath: Fayl yo'li
-            data: Yoziladigan ma'lumotlar
-        """
-        try:
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+                    # Orders jadvali
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS orders (
+                            id SERIAL PRIMARY KEY,
+                            order_number TEXT UNIQUE,
+                            user_id BIGINT REFERENCES users(user_id),
+                            username TEXT,
+                            product_id INTEGER REFERENCES products(id),
+                            customer_name TEXT,
+                            phone TEXT,
+                            address TEXT,
+                            quantity INTEGER DEFAULT 1,
+                            status TEXT DEFAULT 'yangi',
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        );
+                    """)
+                    
+                    # Boshlang'ich kategoriyalarni qo'shish (faqat bo'sh bo'lsa)
+                    cur.execute("SELECT COUNT(*) as count FROM categories")
+                    if cur.fetchone()['count'] == 0:
+                        defaults = [
+                            "👕 Kiyimlar", "👟 Poyabzal", "🎒 Sumkalar",
+                            "⌚ Aksessuarlar", "📱 Elektronika", "🏠 Uy-ro'zg'or"
+                        ]
+                        for cat in defaults:
+                            cur.execute("INSERT INTO categories (name) VALUES (%s) ON CONFLICT DO NOTHING", (cat,))
+                            
         except Exception as e:
-            logger.error(f"❌ Faylga yozishda xatolik ({filepath}): {e}")
+            logger.error(f"❌ Jadvallarni yaratishda xatolik: {e}")
 
     # ==================== CATEGORIES ====================
 
     def get_categories(self) -> List[str]:
-        """
-        Barcha kategoriyalarni olish
-
-        Returns:
-            List[str]: Kategoriyalar ro'yxati
-        """
-        return self._read_json(config.CATEGORIES_FILE)
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT name FROM categories")
+                    return [row['name'] for row in cur.fetchall()]
+        except Exception as e:
+            logger.error(f"Error getting categories: {e}")
+            return []
 
     def add_category(self, category: str) -> bool:
-        """
-        Yangi kategoriya qo'shish
-
-        Args:
-            category: Kategoriya nomi
-
-        Returns:
-            bool: Muvaffaqiyatli bo'lsa True
-        """
-        categories = self.get_categories()
-
-        # Dublikatni tekshirish
-        if category in categories:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("INSERT INTO categories (name) VALUES (%s)", (category,))
+            logger.info(f"✅ Kategoriya qo'shildi: {category}")
+            return True
+        except psycopg2.IntegrityError:
             logger.warning(f"⚠️ Kategoriya allaqachon mavjud: {category}")
             return False
-
-        categories.append(category)
-        self._write_json(config.CATEGORIES_FILE, categories)
-        logger.info(f"✅ Kategoriya qo'shildi: {category}")
-        return True
+        except Exception as e:
+            logger.error(f"Error adding category: {e}")
+            return False
 
     def delete_category(self, category: str) -> bool:
-        """
-        Kategoriyani o'chirish (va unga tegishli barcha tovarlarni)
-
-        Args:
-            category: Kategoriya nomi
-
-        Returns:
-            bool: Muvaffaqiyatli bo'lsa True
-        """
-        categories = self.get_categories()
-
-        if category not in categories:
-            logger.warning(f"⚠️ Kategoriya topilmadi: {category}")
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    # Cascade o'chirish bazada sozlangan, lekin aniqlik uchun:
+                    cur.execute("DELETE FROM categories WHERE name = %s", (category,))
+                    if cur.rowcount > 0:
+                        logger.info(f"✅ Kategoriya o'chirildi: {category}")
+                        return True
+                    return False
+        except Exception as e:
+            logger.error(f"Error deleting category: {e}")
             return False
-
-        # Kategoriyani o'chirish
-        categories.remove(category)
-        self._write_json(config.CATEGORIES_FILE, categories)
-
-        # Bu kategoriyaga tegishli tovarlarni ham o'chirish
-        products = self.get_all_products()
-        products = [p for p in products if p['category'] != category]
-        self._write_json(config.PRODUCTS_FILE, products)
-
-        logger.info(f"✅ Kategoriya o'chirildi: {category}")
-        return True
 
     def update_category(self, old_name: str, new_name: str) -> bool:
-        """
-        Kategoriya nomini o'zgartirish
-
-        Args:
-            old_name: Eski nom
-            new_name: Yangi nom
-
-        Returns:
-            bool: Muvaffaqiyatli bo'lsa True
-        """
-        categories = self.get_categories()
-
-        if old_name not in categories:
-            logger.warning(f"⚠️ Kategoriya topilmadi: {old_name}")
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    # Bazada foreign key constraints bo'lgani uchun cascade update kerak
+                    # Yoki oddiy UPDATE agar foreign keyda ON UPDATE CASCADE bo'lmasa, muammo bo'lishi mumkin.
+                    # Oddiy yechim:
+                    cur.execute("UPDATE categories SET name = %s WHERE name = %s", (new_name, old_name))
+                    # Postgresda products jadvalidagi category ham avtomatik o'zgarishi uchun 
+                    # Table yaratishda REFERENCES categories(name) ON UPDATE CASCADE berish kerak edi.
+                    # Agar berilmagan bo'lsa, qo'lda yangilaymiz:
+                    cur.execute("UPDATE products SET category = %s WHERE category = %s", (new_name, old_name))
+                    
+                    return True
+        except Exception as e:
+            logger.error(f"Error updating category: {e}")
             return False
-
-        # Kategoriya nomini o'zgartirish
-        idx = categories.index(old_name)
-        categories[idx] = new_name
-        self._write_json(config.CATEGORIES_FILE, categories)
-
-        # Tovarlarni ham yangilash
-        products = self.get_all_products()
-        for product in products:
-            if product['category'] == old_name:
-                product['category'] = new_name
-        self._write_json(config.PRODUCTS_FILE, products)
-
-        logger.info(f"✅ Kategoriya o'zgartirildi: {old_name} -> {new_name}")
-        return True
 
     # ==================== PRODUCTS ====================
 
     def add_product(self, category: str, name: str, description: str,
                     price: float, size: str = None, photo_id: str = None) -> Dict:
-        """
-        Yangi tovar qo'shish
-
-        Args:
-            category: Kategoriya
-            name: Tovar nomi
-            description: Tavsifi
-            price: Narxi
-            size: O'lchami/rangi (ixtiyoriy)
-            photo_id: Telegram photo file_id (ixtiyoriy)
-
-        Returns:
-            Dict: Yaratilgan tovar
-        """
-        products = self._read_json(config.PRODUCTS_FILE)
-
-        # Yangi ID yaratish
-        new_id = max([p.get('id', 0) for p in products], default=0) + 1
-
-        product = {
-            'id': new_id,
-            'category': category,
-            'name': name,
-            'description': description,
-            'price': float(price),
-            'size': size,
-            'photo_id': photo_id,
-            'is_available': True,
-            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        }
-
-        products.append(product)
-        self._write_json(config.PRODUCTS_FILE, products)
-
-        logger.info(f"✅ Tovar qo'shildi: {name} (ID: {new_id})")
-        return product
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO products (category, name, description, price, size, photo_id)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        RETURNING *;
+                    """, (category, name, description, float(price), size, photo_id))
+                    product = cur.fetchone()
+                    # Datetime ni stringga o'tkazamiz (eski kod bilan moslik uchun)
+                    product['created_at'] = str(product['created_at'])
+                    logger.info(f"✅ Tovar qo'shildi: {name} (ID: {product['id']})")
+                    return dict(product)
+        except Exception as e:
+            logger.error(f"Error adding product: {e}")
+            return {}
 
     def get_product(self, product_id: int) -> Optional[Dict]:
-        """
-        Tovarni ID bo'yicha olish
-
-        Args:
-            product_id: Tovar ID
-
-        Returns:
-            Optional[Dict]: Tovar yoki None
-        """
-        products = self._read_json(config.PRODUCTS_FILE)
-        for product in products:
-            if product.get('id') == product_id:
-                return product
-        return None
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT * FROM products WHERE id = %s", (product_id,))
+                    product = cur.fetchone()
+                    if product:
+                        product['created_at'] = str(product['created_at'])
+                        return dict(product)
+                    return None
+        except Exception as e:
+            logger.error(f"Error getting product: {e}")
+            return None
 
     def get_products_by_category(self, category: str) -> List[Dict]:
-        """
-        Kategoriya bo'yicha mavjud tovarlarni olish
-
-        Args:
-            category: Kategoriya nomi
-
-        Returns:
-            List[Dict]: Tovarlar ro'yxati
-        """
-        products = self._read_json(config.PRODUCTS_FILE)
-        return [
-            p for p in products
-            if p.get('category') == category and p.get('is_available', True)
-        ]
-
-    def get_all_products(self) -> List[Dict]:
-        """
-        Barcha tovarlarni olish (mavjud va mavjud bo'lmaganlarni)
-
-        Returns:
-            List[Dict]: Tovarlar ro'yxati
-        """
-        return self._read_json(config.PRODUCTS_FILE)
-
-    def get_available_products(self) -> List[Dict]:
-        """
-        Faqat mavjud tovarlarni olish
-
-        Returns:
-            List[Dict]: Mavjud tovarlar ro'yxati
-        """
-        products = self._read_json(config.PRODUCTS_FILE)
-        return [p for p in products if p.get('is_available', True)]
-
-    def get_random_products(self, count: int = 3) -> List[Dict]:
-        """
-        Random tovarlarni olish (avtomatik post uchun)
-
-        Args:
-            count: Tovarlar soni
-
-        Returns:
-            List[Dict]: Random tovarlar
-        """
-        products = self.get_available_products()
-
-        if len(products) == 0:
-            logger.warning("⚠️ Mavjud tovarlar yo'q")
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT * FROM products 
+                        WHERE category = %s AND is_available = TRUE
+                    """, (category,))
+                    products = cur.fetchall()
+                    for p in products: p['created_at'] = str(p['created_at'])
+                    return [dict(p) for p in products]
+        except Exception as e:
+            logger.error(f"Error getting products by category: {e}")
             return []
 
-        if len(products) <= count:
-            return products
+    def get_all_products(self) -> List[Dict]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT * FROM products")
+                    products = cur.fetchall()
+                    for p in products: p['created_at'] = str(p['created_at'])
+                    return [dict(p) for p in products]
+        except Exception as e:
+            logger.error(f"Error getting all products: {e}")
+            return []
 
-        return random.sample(products, count)
+    def get_available_products(self) -> List[Dict]:
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT * FROM products WHERE is_available = TRUE")
+                    products = cur.fetchall()
+                    for p in products: p['created_at'] = str(p['created_at'])
+                    return [dict(p) for p in products]
+        except Exception as e:
+            logger.error(f"Error getting available products: {e}")
+            return []
+
+    def get_random_products(self, count: int = 3) -> List[Dict]:
+        # SQL da random olish osonroq (ORDER BY RANDOM())
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT * FROM products 
+                        WHERE is_available = TRUE 
+                        ORDER BY RANDOM() 
+                        LIMIT %s
+                    """, (count,))
+                    products = cur.fetchall()
+                    for p in products: p['created_at'] = str(p['created_at'])
+                    return [dict(p) for p in products]
+        except Exception as e:
+            logger.error(f"Error getting random products: {e}")
+            return []
 
     def update_product(self, product_id: int, **kwargs) -> bool:
-        """
-        Tovarni yangilash
-
-        Args:
-            product_id: Tovar ID
-            **kwargs: Yangilanadigan maydonlar
-
-        Returns:
-            bool: Muvaffaqiyatli bo'lsa True
-        """
-        products = self._read_json(config.PRODUCTS_FILE)
-
-        for product in products:
-            if product.get('id') == product_id:
-                product.update(kwargs)
-                self._write_json(config.PRODUCTS_FILE, products)
-                logger.info(f"✅ Tovar yangilandi: ID {product_id}")
-                return True
-
-        logger.warning(f"⚠️ Tovar topilmadi: ID {product_id}")
-        return False
+        try:
+            if not kwargs: return False
+            
+            # SQL query yasash (dynamic)
+            set_clause = ", ".join([f"{key} = %s" for key in kwargs.keys()])
+            values = list(kwargs.values())
+            values.append(product_id)
+            
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"UPDATE products SET {set_clause} WHERE id = %s", tuple(values))
+                    if cur.rowcount > 0:
+                        logger.info(f"✅ Tovar yangilandi: ID {product_id}")
+                        return True
+            return False
+        except Exception as e:
+            logger.error(f"Error updating product: {e}")
+            return False
 
     def delete_product(self, product_id: int) -> bool:
-        """
-        Tovarni o'chirish
-
-        Args:
-            product_id: Tovar ID
-
-        Returns:
-            bool: Muvaffaqiyatli bo'lsa True
-        """
-        products = self._read_json(config.PRODUCTS_FILE)
-        original_length = len(products)
-
-        products = [p for p in products if p.get('id') != product_id]
-
-        if len(products) < original_length:
-            self._write_json(config.PRODUCTS_FILE, products)
-            logger.info(f"✅ Tovar o'chirildi: ID {product_id}")
-            return True
-
-        logger.warning(f"⚠️ Tovar topilmadi: ID {product_id}")
-        return False
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM products WHERE id = %s", (product_id,))
+                    if cur.rowcount > 0:
+                        logger.info(f"✅ Tovar o'chirildi: ID {product_id}")
+                        return True
+            return False
+        except Exception as e:
+            logger.error(f"Error deleting product: {e}")
+            return False
 
     def toggle_product_availability(self, product_id: int) -> bool:
-        """
-        Tovar mavjudligini o'zgartirish
-
-        Args:
-            product_id: Tovar ID
-
-        Returns:
-            bool: Muvaffaqiyatli bo'lsa True
-        """
-        products = self._read_json(config.PRODUCTS_FILE)
-
-        for product in products:
-            if product.get('id') == product_id:
-                product['is_available'] = not product.get('is_available', True)
-                self._write_json(config.PRODUCTS_FILE, products)
-                status = "Mavjud" if product['is_available'] else "Mavjud emas"
-                logger.info(f"✅ Tovar mavjudligi o'zgartirildi: ID {product_id} -> {status}")
-                return True
-
-        logger.warning(f"⚠️ Tovar topilmadi: ID {product_id}")
-        return False
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE products 
+                        SET is_available = NOT is_available 
+                        WHERE id = %s 
+                        RETURNING is_available
+                    """, (product_id,))
+                    result = cur.fetchone()
+                    if result:
+                        status = "Mavjud" if result['is_available'] else "Mavjud emas"
+                        logger.info(f"✅ Tovar statusi: {product_id} -> {status}")
+                        return True
+            return False
+        except Exception as e:
+            logger.error(f"Error toggling product: {e}")
+            return False
 
     # ==================== ORDERS ====================
 
     def create_order(self, user_id: int, username: str, product_id: int,
-                     customer_name: str, phone: str, address: str,
-                     quantity: int = 1) -> Dict:
-        """
-        Yangi buyurtma yaratish
-
-        Args:
-            user_id: Telegram user ID
-            username: Telegram username
-            product_id: Tovar ID
-            customer_name: Mijoz ismi
-            phone: Telefon
-            address: Manzil
-            quantity: Miqdor
-
-        Returns:
-            Dict: Yaratilgan buyurtma
-        """
-        orders = self._read_json(config.ORDERS_FILE)
-
-        # Yangi ID yaratish
-        new_id = max([o.get('id', 0) for o in orders], default=0) + 1
-
-        # Buyurtma raqamini generatsiya qilish
-        order_number = f"ORD-{datetime.now().strftime('%Y%m%d%H%M%S')}-{user_id}"
-
-        order = {
-            'id': new_id,
-            'order_number': order_number,
-            'user_id': user_id,
-            'username': username,
-            'product_id': product_id,
-            'customer_name': customer_name,
-            'phone': phone,
-            'address': address,
-            'quantity': quantity,
-            'status': 'yangi',
-            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        }
-
-        orders.append(order)
-        self._write_json(config.ORDERS_FILE, orders)
-
-        logger.info(f"✅ Buyurtma yaratildi: {order_number}")
-        return order
+                      customer_name: str, phone: str, address: str,
+                      quantity: int = 1) -> Dict:
+        try:
+            order_number = f"ORD-{datetime.now().strftime('%Y%m%d%H%M%S')}-{user_id}"
+            
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO orders (order_number, user_id, username, product_id, customer_name, phone, address, quantity)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING *;
+                    """, (order_number, user_id, username, product_id, customer_name, phone, address, quantity))
+                    order = cur.fetchone()
+                    order['created_at'] = str(order['created_at'])
+                    logger.info(f"✅ Buyurtma yaratildi: {order_number}")
+                    return dict(order)
+        except Exception as e:
+            logger.error(f"Error creating order: {e}")
+            return {}
 
     def get_order(self, order_id: int) -> Optional[Dict]:
-        """
-        Buyurtmani ID bo'yicha olish
-
-        Args:
-            order_id: Buyurtma ID
-
-        Returns:
-            Optional[Dict]: Buyurtma yoki None
-        """
-        orders = self._read_json(config.ORDERS_FILE)
-        for order in orders:
-            if order.get('id') == order_id:
-                return order
-        return None
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT * FROM orders WHERE id = %s", (order_id,))
+                    order = cur.fetchone()
+                    if order:
+                        order['created_at'] = str(order['created_at'])
+                        return dict(order)
+                    return None
+        except Exception as e:
+            logger.error(f"Error getting order: {e}")
+            return None
 
     def get_user_orders(self, user_id: int) -> List[Dict]:
-        """
-        Foydalanuvchi buyurtmalarini olish
-
-        Args:
-            user_id: Telegram user ID
-
-        Returns:
-            List[Dict]: Buyurtmalar ro'yxati
-        """
-        orders = self._read_json(config.ORDERS_FILE)
-        user_orders = [o for o in orders if o.get('user_id') == user_id]
-
-        # Sana bo'yicha saralash (eng yangi birinchi)
-        return sorted(
-            user_orders,
-            key=lambda x: x.get('created_at', ''),
-            reverse=True
-        )
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT * FROM orders 
+                        WHERE user_id = %s 
+                        ORDER BY created_at DESC
+                    """, (user_id,))
+                    orders = cur.fetchall()
+                    for o in orders: o['created_at'] = str(o['created_at'])
+                    return [dict(o) for o in orders]
+        except Exception as e:
+            logger.error(f"Error getting user orders: {e}")
+            return []
 
     def get_all_orders(self) -> List[Dict]:
-        """
-        Barcha buyurtmalarni olish
-
-        Returns:
-            List[Dict]: Buyurtmalar ro'yxati
-        """
-        orders = self._read_json(config.ORDERS_FILE)
-
-        # Sana bo'yicha saralash
-        return sorted(
-            orders,
-            key=lambda x: x.get('created_at', ''),
-            reverse=True
-        )
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT * FROM orders ORDER BY created_at DESC")
+                    orders = cur.fetchall()
+                    for o in orders: o['created_at'] = str(o['created_at'])
+                    return [dict(o) for o in orders]
+        except Exception as e:
+            logger.error(f"Error getting all orders: {e}")
+            return []
 
     def update_order_status(self, order_id: int, status: str) -> bool:
-        """
-        Buyurtma statusini yangilash
-
-        Args:
-            order_id: Buyurtma ID
-            status: Yangi status
-
-        Returns:
-            bool: Muvaffaqiyatli bo'lsa True
-        """
-        orders = self._read_json(config.ORDERS_FILE)
-
-        for order in orders:
-            if order.get('id') == order_id:
-                order['status'] = status
-                self._write_json(config.ORDERS_FILE, orders)
-                logger.info(f"✅ Buyurtma statusi o'zgartirildi: {order.get('order_number')} -> {status}")
-                return True
-
-        logger.warning(f"⚠️ Buyurtma topilmadi: ID {order_id}")
-        return False
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE orders SET status = %s WHERE id = %s", (status, order_id))
+                    if cur.rowcount > 0:
+                        logger.info(f"✅ Buyurtma statusi o'zgartirildi: {order_id} -> {status}")
+                        return True
+            return False
+        except Exception as e:
+            logger.error(f"Error updating order status: {e}")
+            return False
 
     # ==================== USERS ====================
 
     def add_user(self, user_id: int, username: str = None,
                  first_name: str = None, last_name: str = None) -> Dict:
-        """
-        Foydalanuvchi qo'shish yoki yangilash
-
-        Args:
-            user_id: Telegram user ID
-            username: Username (ixtiyoriy)
-            first_name: Ism (ixtiyoriy)
-            last_name: Familiya (ixtiyoriy)
-
-        Returns:
-            Dict: Foydalanuvchi ma'lumotlari
-        """
-        users = self._read_json(config.USERS_FILE)
-
-        # Foydalanuvchi mavjudligini tekshirish
-        for user in users:
-            if user.get('user_id') == user_id:
-                # Yangilash
-                user['username'] = username
-                user['first_name'] = first_name
-                user['last_name'] = last_name
-                self._write_json(config.USERS_FILE, users)
-                return user
-
-        # Yangi foydalanuvchi qo'shish
-        user = {
-            'user_id': user_id,
-            'username': username,
-            'first_name': first_name,
-            'last_name': last_name,
-            'is_blocked': False,
-            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        }
-
-        users.append(user)
-        self._write_json(config.USERS_FILE, users)
-
-        logger.info(f"✅ Yangi foydalanuvchi: {user_id} (@{username})")
-        return user
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    # Upsert (Insert or Update)
+                    cur.execute("""
+                        INSERT INTO users (user_id, username, first_name, last_name)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (user_id) 
+                        DO UPDATE SET 
+                            username = EXCLUDED.username,
+                            first_name = EXCLUDED.first_name,
+                            last_name = EXCLUDED.last_name
+                        RETURNING *;
+                    """, (user_id, username, first_name, last_name))
+                    user = cur.fetchone()
+                    user['created_at'] = str(user['created_at'])
+                    return dict(user)
+        except Exception as e:
+            logger.error(f"Error adding user: {e}")
+            return {}
 
     def get_all_users(self) -> List[Dict]:
-        """
-        Barcha foydalanuvchilarni olish
-
-        Returns:
-            List[Dict]: Foydalanuvchilar ro'yxati
-        """
-        return self._read_json(config.USERS_FILE)
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT * FROM users")
+                    users = cur.fetchall()
+                    for u in users: u['created_at'] = str(u['created_at'])
+                    return [dict(u) for u in users]
+        except Exception as e:
+            logger.error(f"Error getting all users: {e}")
+            return []
 
     def get_users_count(self) -> int:
-        """
-        Foydalanuvchilar sonini olish
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) as count FROM users")
+                    return cur.fetchone()['count']
+        except Exception as e:
+            logger.error(f"Error counting users: {e}")
+            return 0
 
-        Returns:
-            int: Foydalanuvchilar soni
-        """
-        users = self._read_json(config.USERS_FILE)
-        return len(users)
 
-
-# Global database obyekti
+# Global database obyekti (o'zgarmasdan qoladi)
 db = JSONDatabase()
