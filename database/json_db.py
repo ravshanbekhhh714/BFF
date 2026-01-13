@@ -1,6 +1,6 @@
 """
-Database bilan ishlash moduli - PostgreSQL versiya
-(Tashqi ko'rinishi eski JSONDatabase bilan bir xil)
+Database bilan ishlash moduli - PostgreSQL versiya (Queue Logic)
+Funksiya nomi 'get_random_products' lekin mantiq KETMA-KETLIK asosida ishlaydi.
 """
 
 import os
@@ -9,27 +9,14 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime
 from typing import List, Optional, Dict, Any
-import random
 
-# Config faylingizdan kerakli o'zgaruvchilarni import qiling
-# Agar configda DATABASE_URL bo'lmasa, uni os.getenv dan olamiz
 import config 
 
 logger = logging.getLogger(__name__)
 
 class JSONDatabase:
-    """
-    Eski JSONDatabase klassining PostgreSQL adaptatsiyasi.
-    Barcha metodlar va nomlar saqlab qolingan.
-    """
-
     def __init__(self):
-        """
-        Initsializatsiya - Bazaga ulanish va jadvallarni yaratish
-        """
-        # Railwayda DATABASE_URL environment variable ichida bo'ladi
         self.db_url = os.getenv("DATABASE_URL")
-        
         if not self.db_url:
             logger.error("❌ DATABASE_URL topilmadi! Railway Variables ni tekshiring.")
             return
@@ -38,24 +25,23 @@ class JSONDatabase:
         logger.info("✅ PostgreSQL Database initsializatsiya qilindi")
 
     def _get_connection(self):
-        """Bazaga ulanish ob'ektini qaytaradi"""
         conn = psycopg2.connect(self.db_url, cursor_factory=RealDictCursor)
         conn.autocommit = True
         return conn
 
     def _create_tables(self):
-        """Jadvallarni yaratish (agar yo'q bo'lsa)"""
+        """Jadvallarni yaratish va yangilash"""
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cur:
-                    # Categories jadvali
+                    # Categories
                     cur.execute("""
                         CREATE TABLE IF NOT EXISTS categories (
                             name TEXT PRIMARY KEY
                         );
                     """)
                     
-                    # Products jadvali
+                    # Products
                     cur.execute("""
                         CREATE TABLE IF NOT EXISTS products (
                             id SERIAL PRIMARY KEY,
@@ -70,7 +56,15 @@ class JSONDatabase:
                         );
                     """)
 
-                    # Users jadvali
+                    # --- MUHIM YANGILIK ---
+                    # Navbat bilan chiqarish uchun yangi ustun qo'shamiz
+                    cur.execute("""
+                        ALTER TABLE products 
+                        ADD COLUMN IF NOT EXISTS last_posted_at TIMESTAMP;
+                    """)
+                    # ----------------------
+
+                    # Users
                     cur.execute("""
                         CREATE TABLE IF NOT EXISTS users (
                             user_id BIGINT PRIMARY KEY,
@@ -82,7 +76,7 @@ class JSONDatabase:
                         );
                     """)
 
-                    # Orders jadvali
+                    # Orders
                     cur.execute("""
                         CREATE TABLE IF NOT EXISTS orders (
                             id SERIAL PRIMARY KEY,
@@ -99,20 +93,59 @@ class JSONDatabase:
                         );
                     """)
                     
-                    # Boshlang'ich kategoriyalarni qo'shish (faqat bo'sh bo'lsa)
+                    # Default categories
                     cur.execute("SELECT COUNT(*) as count FROM categories")
                     if cur.fetchone()['count'] == 0:
-                        defaults = [
-                            "👕 Kiyimlar", "👟 Poyabzal", "🎒 Sumkalar",
-                            "⌚ Aksessuarlar", "📱 Elektronika", "🏠 Uy-ro'zg'or"
-                        ]
+                        defaults = ["👕 Kiyimlar", "👟 Poyabzal", "🎒 Sumkalar", "⌚ Aksessuarlar", "📱 Elektronika", "🏠 Uy-ro'zg'or"]
                         for cat in defaults:
                             cur.execute("INSERT INTO categories (name) VALUES (%s) ON CONFLICT DO NOTHING", (cat,))
                             
         except Exception as e:
             logger.error(f"❌ Jadvallarni yaratishda xatolik: {e}")
 
-    # ==================== CATEGORIES ====================
+    # ==================== LOGIKA O'ZGARGAN QISM ====================
+
+    def get_random_products(self, count: int = 3) -> List[Dict]:
+        """
+        DIQQAT: Nomi 'random' bo'lgani bilan, aslida KETMA-KETLIK bo'yicha ishlaydi.
+        Eng ko'p vaqt davomida chiqmagan tovarlarni oladi.
+        """
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    # 1. Navbatdagi tovarlarni olish
+                    # Logic: last_posted_at bo'sh bo'lganlar (yangi) yoki eng eski sana bo'lganlar birinchi chiqadi
+                    cur.execute("""
+                        SELECT * FROM products 
+                        WHERE is_available = TRUE 
+                        ORDER BY last_posted_at ASC NULLS FIRST
+                        LIMIT %s
+                    """, (count,))
+                    
+                    products = cur.fetchall()
+                    
+                    if not products:
+                        return []
+
+                    # 2. Vaqtni yangilash (Hozir chiqdi deb belgilash)
+                    product_ids = tuple([p['id'] for p in products])
+                    
+                    if product_ids:
+                        cur.execute("UPDATE products SET last_posted_at = NOW() WHERE id IN %s", (product_ids,))
+                    
+                    # 3. Formatlash
+                    for p in products: 
+                        p['created_at'] = str(p['created_at'])
+                        if p.get('last_posted_at'):
+                            p['last_posted_at'] = str(p['last_posted_at'])
+                            
+                    return [dict(p) for p in products]
+                    
+        except Exception as e:
+            logger.error(f"Error getting next products: {e}")
+            return []
+
+    # ==================== QOLGAN QISMLAR (O'ZGARISHSIZ) ====================
 
     def get_categories(self) -> List[str]:
         try:
@@ -129,10 +162,8 @@ class JSONDatabase:
             with self._get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("INSERT INTO categories (name) VALUES (%s)", (category,))
-            logger.info(f"✅ Kategoriya qo'shildi: {category}")
             return True
         except psycopg2.IntegrityError:
-            logger.warning(f"⚠️ Kategoriya allaqachon mavjud: {category}")
             return False
         except Exception as e:
             logger.error(f"Error adding category: {e}")
@@ -142,12 +173,8 @@ class JSONDatabase:
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cur:
-                    # Cascade o'chirish bazada sozlangan, lekin aniqlik uchun:
                     cur.execute("DELETE FROM categories WHERE name = %s", (category,))
-                    if cur.rowcount > 0:
-                        logger.info(f"✅ Kategoriya o'chirildi: {category}")
-                        return True
-                    return False
+                    return cur.rowcount > 0
         except Exception as e:
             logger.error(f"Error deleting category: {e}")
             return False
@@ -156,21 +183,12 @@ class JSONDatabase:
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cur:
-                    # Bazada foreign key constraints bo'lgani uchun cascade update kerak
-                    # Yoki oddiy UPDATE agar foreign keyda ON UPDATE CASCADE bo'lmasa, muammo bo'lishi mumkin.
-                    # Oddiy yechim:
                     cur.execute("UPDATE categories SET name = %s WHERE name = %s", (new_name, old_name))
-                    # Postgresda products jadvalidagi category ham avtomatik o'zgarishi uchun 
-                    # Table yaratishda REFERENCES categories(name) ON UPDATE CASCADE berish kerak edi.
-                    # Agar berilmagan bo'lsa, qo'lda yangilaymiz:
                     cur.execute("UPDATE products SET category = %s WHERE category = %s", (new_name, old_name))
-                    
                     return True
         except Exception as e:
             logger.error(f"Error updating category: {e}")
             return False
-
-    # ==================== PRODUCTS ====================
 
     def add_product(self, category: str, name: str, description: str,
                     price: float, size: str = None, photo_id: str = None) -> Dict:
@@ -183,9 +201,7 @@ class JSONDatabase:
                         RETURNING *;
                     """, (category, name, description, float(price), size, photo_id))
                     product = cur.fetchone()
-                    # Datetime ni stringga o'tkazamiz (eski kod bilan moslik uchun)
                     product['created_at'] = str(product['created_at'])
-                    logger.info(f"✅ Tovar qo'shildi: {name} (ID: {product['id']})")
                     return dict(product)
         except Exception as e:
             logger.error(f"Error adding product: {e}")
@@ -209,10 +225,7 @@ class JSONDatabase:
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("""
-                        SELECT * FROM products 
-                        WHERE category = %s AND is_available = TRUE
-                    """, (category,))
+                    cur.execute("SELECT * FROM products WHERE category = %s AND is_available = TRUE", (category,))
                     products = cur.fetchall()
                     for p in products: p['created_at'] = str(p['created_at'])
                     return [dict(p) for p in products]
@@ -244,40 +257,16 @@ class JSONDatabase:
             logger.error(f"Error getting available products: {e}")
             return []
 
-    def get_random_products(self, count: int = 3) -> List[Dict]:
-        # SQL da random olish osonroq (ORDER BY RANDOM())
-        try:
-            with self._get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        SELECT * FROM products 
-                        WHERE is_available = TRUE 
-                        ORDER BY RANDOM() 
-                        LIMIT %s
-                    """, (count,))
-                    products = cur.fetchall()
-                    for p in products: p['created_at'] = str(p['created_at'])
-                    return [dict(p) for p in products]
-        except Exception as e:
-            logger.error(f"Error getting random products: {e}")
-            return []
-
     def update_product(self, product_id: int, **kwargs) -> bool:
         try:
             if not kwargs: return False
-            
-            # SQL query yasash (dynamic)
             set_clause = ", ".join([f"{key} = %s" for key in kwargs.keys()])
             values = list(kwargs.values())
             values.append(product_id)
-            
             with self._get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(f"UPDATE products SET {set_clause} WHERE id = %s", tuple(values))
-                    if cur.rowcount > 0:
-                        logger.info(f"✅ Tovar yangilandi: ID {product_id}")
-                        return True
-            return False
+                    return cur.rowcount > 0
         except Exception as e:
             logger.error(f"Error updating product: {e}")
             return False
@@ -287,10 +276,7 @@ class JSONDatabase:
             with self._get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("DELETE FROM products WHERE id = %s", (product_id,))
-                    if cur.rowcount > 0:
-                        logger.info(f"✅ Tovar o'chirildi: ID {product_id}")
-                        return True
-            return False
+                    return cur.rowcount > 0
         except Exception as e:
             logger.error(f"Error deleting product: {e}")
             return False
@@ -299,30 +285,17 @@ class JSONDatabase:
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("""
-                        UPDATE products 
-                        SET is_available = NOT is_available 
-                        WHERE id = %s 
-                        RETURNING is_available
-                    """, (product_id,))
+                    cur.execute("UPDATE products SET is_available = NOT is_available WHERE id = %s RETURNING is_available", (product_id,))
                     result = cur.fetchone()
-                    if result:
-                        status = "Mavjud" if result['is_available'] else "Mavjud emas"
-                        logger.info(f"✅ Tovar statusi: {product_id} -> {status}")
-                        return True
-            return False
+                    return True if result else False
         except Exception as e:
             logger.error(f"Error toggling product: {e}")
             return False
 
-    # ==================== ORDERS ====================
-
     def create_order(self, user_id: int, username: str, product_id: int,
-                      customer_name: str, phone: str, address: str,
-                      quantity: int = 1) -> Dict:
+                      customer_name: str, phone: str, address: str, quantity: int = 1) -> Dict:
         try:
             order_number = f"ORD-{datetime.now().strftime('%Y%m%d%H%M%S')}-{user_id}"
-            
             with self._get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
@@ -332,7 +305,6 @@ class JSONDatabase:
                     """, (order_number, user_id, username, product_id, customer_name, phone, address, quantity))
                     order = cur.fetchone()
                     order['created_at'] = str(order['created_at'])
-                    logger.info(f"✅ Buyurtma yaratildi: {order_number}")
                     return dict(order)
         except Exception as e:
             logger.error(f"Error creating order: {e}")
@@ -356,11 +328,7 @@ class JSONDatabase:
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("""
-                        SELECT * FROM orders 
-                        WHERE user_id = %s 
-                        ORDER BY created_at DESC
-                    """, (user_id,))
+                    cur.execute("SELECT * FROM orders WHERE user_id = %s ORDER BY created_at DESC", (user_id,))
                     orders = cur.fetchall()
                     for o in orders: o['created_at'] = str(o['created_at'])
                     return [dict(o) for o in orders]
@@ -385,30 +353,21 @@ class JSONDatabase:
             with self._get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("UPDATE orders SET status = %s WHERE id = %s", (status, order_id))
-                    if cur.rowcount > 0:
-                        logger.info(f"✅ Buyurtma statusi o'zgartirildi: {order_id} -> {status}")
-                        return True
-            return False
+                    return cur.rowcount > 0
         except Exception as e:
             logger.error(f"Error updating order status: {e}")
             return False
-
-    # ==================== USERS ====================
 
     def add_user(self, user_id: int, username: str = None,
                  first_name: str = None, last_name: str = None) -> Dict:
         try:
             with self._get_connection() as conn:
                 with conn.cursor() as cur:
-                    # Upsert (Insert or Update)
                     cur.execute("""
                         INSERT INTO users (user_id, username, first_name, last_name)
                         VALUES (%s, %s, %s, %s)
                         ON CONFLICT (user_id) 
-                        DO UPDATE SET 
-                            username = EXCLUDED.username,
-                            first_name = EXCLUDED.first_name,
-                            last_name = EXCLUDED.last_name
+                        DO UPDATE SET username = EXCLUDED.username, first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name
                         RETURNING *;
                     """, (user_id, username, first_name, last_name))
                     user = cur.fetchone()
@@ -440,6 +399,5 @@ class JSONDatabase:
             logger.error(f"Error counting users: {e}")
             return 0
 
-
-# Global database obyekti (o'zgarmasdan qoladi)
+# Global database obyekti
 db = JSONDatabase()
