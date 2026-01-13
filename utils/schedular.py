@@ -54,13 +54,15 @@ async def post_random_products(bot: Bot):
 
                 caption += f"\n✅ Buyurtma berish uchun botga o'ting: @{bot_username}"
 
-                # Inline klaviatura yaratish - DEEP LINK
+                # Inline klaviatura - ADMINGA YO'NALTIRISH
+                # Agar config fayl tepada import qilingan bo'lsa (import config)
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(
-                        text="🛒 Buyurtma berish",
-                        url=f"https://t.me/{bot_username}?start=order_{product['id']}"
+                        text="👤 Adminga yozish",
+                        url=f"https://t.me/{config.ADMIN_USERNAME}"
                     )]
                 ])
+
 
                 # Kanalga yuborish
                 if config.CHANNEL_ID:
