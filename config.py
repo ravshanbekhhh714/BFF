@@ -16,6 +16,7 @@ ADMINS = [
     5606706053,
     7732032898,# Ikkinchi admin
 ]
+ADMIN_USERNAME = "BFF_007"
 
 # Kanal va guruh ID'lari
 CHANNEL_ID = -1003196603414  # @yourchannel
